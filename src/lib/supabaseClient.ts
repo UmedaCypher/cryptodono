@@ -2,8 +2,8 @@
 
 import { createClient } from '@supabase/supabase-js'
 
-// Récupérer les variables d'environnement
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
+// ✅ CORRECTION : Utilisation des variables d'environnement renommées pour plus de clarté
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL_DB!
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 
 // Créer et exporter le client Supabase

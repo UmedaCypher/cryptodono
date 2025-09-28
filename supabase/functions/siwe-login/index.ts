@@ -1,61 +1,78 @@
-// supabase/functions/siwe-login/index.ts
-
 import { serve } from 'https://deno.land/std@0.177.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.43.4'
 import { SiweMessage } from 'npm:siwe@^2.1.4'
 
-// Fonction pour gérer les requêtes CORS (sécurité inter-domaines)
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 }
 
 serve(async (req) => {
-  // Gérer la requête pre-flight CORS
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders })
   }
 
   try {
     const { message, signature } = await req.json()
+    if (!message || !signature) throw new Error('Message or signature not provided.')
+
     const siweMessage = new SiweMessage(message)
+    const { data: fields } = await siweMessage.verify({ signature })
 
-    // Étape 1: Vérifier la signature du message. C'est la preuve cryptographique.
-    const { data: fields, error } = await siweMessage.verify({ signature })
-    if (error) throw new Error(`Signature verification failed: ${error.message}`)
+    const userWalletAddress = fields.address.toLowerCase()
+    const userEmail = `${userWalletAddress}@wallet.com`
+    const tempPassword = crypto.randomUUID() // Mot de passe sécurisé à usage unique
 
-    // Étape 2: Si la signature est valide, créer un client Supabase "Admin".
-    // Ce client a les droits pour créer des utilisateurs, ce que le client public ne peut pas faire.
     const supabaseAdmin = createClient(
-      Deno.env.get('SUPABASE_URL') ?? '',
-      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+      Deno.env.get('SUPABASE_URL')!,
+      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
     )
 
-    // Étape 3: Chercher ou créer l'utilisateur dans Supabase Auth.
-    // On utilise l'adresse du portefeuille comme identifiant.
-    const { data: { user }, error: userError } = await supabaseAdmin.auth.admin.getOrCreateUser({
-       address: fields.address,
-    })
-    if (userError) throw userError
+    // Étape 1 : Trouver l'utilisateur ou le créer avec un mot de passe temporaire connu
+    const { data: { users }, error: listError } = await supabaseAdmin.auth.admin.listUsers({ email: userEmail });
+    if (listError) throw listError;
 
-    // Étape 4: Générer un token de session (JWT) pour cet utilisateur.
-    const { data: { session }, error: sessionError } = await supabaseAdmin.auth.signInWithPassword({
-      email: user.email, // L'email est fictif ici, Supabase le gère en interne
-      password: "password" // Le mot de passe est fictif, l'authentification est basée sur la signature
-    })
+    if (users && users.length > 0) {
+      console.log("✅ Utilisateur existant trouvé. Mise à jour du mot de passe temporaire.");
+      // Mettre à jour le mot de passe pour pouvoir se connecter juste après
+      await supabaseAdmin.auth.admin.updateUserById(users[0].id, { password: tempPassword });
+    } else {
+      console.log("🆕 Utilisateur non trouvé, création en cours...");
+      const { error: creationError } = await supabaseAdmin.auth.admin.createUser({
+        email: userEmail,
+        password: tempPassword,
+        user_metadata: { address: userWalletAddress },
+        email_confirm: true, // L'utilisateur est déjà vérifié par son portefeuille
+      });
+      if (creationError) throw creationError;
+      console.log("✅ Utilisateur créé.");
+    }
 
-    if (sessionError) throw sessionError
+    // Étape 2 : Utiliser le mot de passe temporaire pour se connecter et obtenir une session valide
+    console.log("🔑 Connexion avec le mot de passe temporaire pour générer la session...");
+    const { data: sessionData, error: signInError } = await supabaseAdmin.auth.signInWithPassword({
+      email: userEmail,
+      password: tempPassword,
+    });
 
-    // Étape 5: Renvoyer la session au client.
+    if (signInError) throw signInError;
+
+    const { session } = sessionData;
+    if (!session) throw new Error("La connexion n'a pas retourné de session valide.");
+
+    console.log("🎉 Session générée avec succès !");
+
+    // On renvoie l'objet session complet, que le client frontend saura gérer
     return new Response(
       JSON.stringify(session),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-    )
+    );
 
   } catch (error) {
+    console.error("❌ Erreur dans siwe-login:", error);
     return new Response(
       JSON.stringify({ error: error.message }),
       { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-    )
+    );
   }
-})
+});
